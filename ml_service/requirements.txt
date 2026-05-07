@@ -1,0 +1,8 @@
+confluent-kafka==2.5.3
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+pillow==10.4.0
+tensorflow-cpu==2.18.1
+# boto3/botocore are used for OCI's S3-compatible object-storage endpoint.
+boto3==1.35.99
+botocore==1.35.99
