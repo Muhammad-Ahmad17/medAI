@@ -1,9 +1,6 @@
 import { env } from '../config/env.js'
 import { getPresignedReadUrl } from '../infra/oci.js'
-import {
-  parseObjectKeyFromUrl,
-  isAlreadyPresigned,
-} from '../utils/objectStorageUrl.js'
+import { parseObjectKeyFromUrl , isAlreadyPresigned} from '../utils/objectStorageUrl.js'
 
 /**
  * Returns a copy of job.result with imageUrls replaced by short-lived presigned GET URLs.

@@ -1,0 +1,612 @@
+# ============================================================
+# Full function / module map for the cancer_cells microservices
+# Each entry describes: what the function does, what it
+# receives / returns, and exactly where it is called from.
+# ============================================================
+
+services:
+
+  # ──────────────────────────────────────────────────────────
+  # 1. API GATEWAY  (Node.js / Fastify)  api_gateway/
+  # Entry point for every browser request.
+  # Handles file upload, creates the job record, fires the
+  # first Kafka event, and serves status / result queries.
+  # ──────────────────────────────────────────────────────────
+  api_gateway:
+
+    config:
+      env.js:
+        purpose: >
+          Reads every required env-var at startup and freezes them into a
+          single immutable object so the rest of the service never touches
+          process.env directly. Throws on any missing variable so bad
+          configuration fails loudly at boot, not in production.
+        exports:
+          - env  # frozen object consumed by every other module
+
+    infra:
+      kafka.js:
+        purpose: >
+          Wraps kafkajs producer in a singleton with a lazy-connect guard.
+          Three thin helpers hide the connect/disconnect lifecycle from
+          routes and services.
+        functions:
+          connectProducer:
+            does: Opens the Kafka TCP connection (idempotent; skips if already connected).
+            called_by: [ api_gateway/src/index.js → start() ]
+
+          disconnectProducer:
+            does: Closes the Kafka TCP connection on SIGINT/SIGTERM.
+            called_by: [ api_gateway/src/index.js → shutdown() ]
+
+          publishEvent:
+            does: >
+              Serialises payload to JSON and sends it to a named Kafka topic.
+              Auto-connects the producer the first time if it was not already
+              connected (lazy connect).
+            receives: topic (string), payload (object)
+            returns: Promise<void>
+            called_by: [ api_gateway/src/routes/upload.js → POST /api/upload ]
+
+      oci.js:
+        purpose: >
+          Wraps the AWS SDK v3 S3Client pointed at Oracle Object Storage
+          (OCI S3-compatible API). All bucket credentials live only here.
+        functions:
+          uploadToOCI:
+            does: >
+              PUTs a file buffer under uploads/{timestamp}-{filename}.
+              Returns the objectKey (not the full URL) so the key can be
+              stored in the job record and used later to build presigned URLs.
+            receives: buffer (Buffer), filename (string), mimetype (string)
+            returns: Promise<objectKey: string>
+            called_by: [ api_gateway/src/routes/upload.js → POST /api/upload ]
+
+          downloadFromOCI:
+            does: >
+              GETs an object by key and returns it as a Node Buffer.
+              Not used in the normal request path; available for admin tooling.
+            receives: objectKey (string)
+            returns: Promise<Buffer>
+            called_by: not called in current request path (utility)
+
+          getOCIUrl:
+            does: >
+              Builds a plain (public) path-style URL for an object.
+              Only useful if the bucket is public; for private buckets use
+              getPresignedReadUrl instead.
+            receives: objectKey (string)
+            returns: string (non-signed URL)
+            called_by: not called in current request path (utility)
+
+          getPresignedReadUrl:
+            does: >
+              Issues an AWS SigV4 pre-signed GET URL that expires after a
+              configurable number of seconds (OCI_PRESIGN_EXPIRES_SECONDS).
+              The browser can download the private object without any credentials
+              for that window only.
+            receives: objectKey (string), expiresInSeconds (number)
+            returns: Promise<presignedUrl: string>
+            called_by: [ api_gateway/src/services/presignResult.js → presignJobResult() ]
+
+      redis.js:
+        purpose: >
+          Creates a single ioredis connection and exposes a one-liner init
+          helper used at startup to verify the connection before the server
+          starts accepting traffic.
+        functions:
+          initRedis:
+            does: Sends a PING to Redis; throws if unreachable.
+            called_by: [ api_gateway/src/index.js → start() ]
+        exports:
+          - redis  # live connection used by jobService.js
+
+      postgres.js:
+        purpose: >
+          Creates a pg.Pool connection and auto-creates the jobs / predictions
+          / results tables on first boot (idempotent CREATE TABLE IF NOT EXISTS).
+          This is the API gateway's own Postgres client; it is separate from the
+          result_aggregator's client because the two services run in different
+          containers and must each hold their own connection pool.
+        functions:
+          initializeDatabase:
+            does: >
+              Opens the pool, validates connectivity, and calls createTables().
+              Called at startup so the gateway never starts without a DB.
+            called_by: [ api_gateway/src/index.js → start() ]
+
+          createTables (private):
+            does: >
+              Runs CREATE TABLE IF NOT EXISTS for jobs, predictions, and results
+              plus three indexes. Called only from initializeDatabase.
+            called_by: [ initializeDatabase ]
+        exports:
+          - db  # pg.Pool instance used by jobService.js
+
+    services:
+      jobService.js:
+        purpose: >
+          All job CRUD lives here. Redis is the primary store (fast, O(1) GET);
+          Postgres is the durable fallback (survives Redis restart).
+          Every write goes to BOTH so they stay in sync.
+        functions:
+          createJob:
+            does: >
+              Generates a UUID, writes the job record with status="received" to
+              Redis (with 7-day TTL via SETEX) and inserts the same row into
+              Postgres jobs table. Returns the new jobId.
+            receives: jobData { filename, filesize, objectKey, mimetype }
+            returns: Promise<jobId: string>
+            called_by: [ api_gateway/src/routes/upload.js → POST /api/upload ]
+
+          getJob:
+            does: >
+              Reads the job from Redis first (fast path). If the Redis key has
+              expired or the cache is cold, falls back to a SELECT on Postgres
+              and re-maps the snake_case columns to camelCase.
+            receives: jobId (string)
+            returns: Promise<jobRecord | null>
+            called_by:
+              - api_gateway/src/routes/status.js → GET /api/status/:jobId
+              - api_gateway/src/routes/status.js → GET /api/results/:jobId
+              - api_gateway/src/services/jobService.js → updateJobStatus (self)
+
+          updateJobStatus:
+            does: >
+              Merges new status + optional updates into the existing job,
+              refreshes the Redis SETEX TTL, and UPDATEs Postgres.
+              Called by the result_aggregator via Redis (the aggregator writes
+              directly to the shared Redis key, not through this function).
+            receives: jobId (string), status (string), updates (object, optional)
+            returns: Promise<updatedRecord>
+            called_by: >
+              Not called at runtime in the current flow — the result_aggregator
+              mutates Redis directly; this function is available for future
+              admin endpoints.
+
+      presignResult.js:
+        purpose: >
+          Converts raw OCI object-key URLs stored in job.result.imageUrls into
+          short-lived SigV4 signed URLs before the response is sent to the
+          browser. The bucket stays private; presigning happens on every read
+          request so the signed links are always fresh within the TTL window.
+        functions:
+          presignJobResult:
+            does: >
+              Iterates result.imageUrls; skips any URL that is already signed
+              (detected by X-Amz-Algorithm query param); for the rest it strips
+              the objectKey from the URL and calls getPresignedReadUrl.
+              Returns a new result object with imageUrls replaced.
+            receives: result { prediction, confidence, imageUrls[] }
+            returns: Promise<result with presigned imageUrls>
+            called_by:
+              - api_gateway/src/routes/status.js → GET /api/status/:jobId
+              - api_gateway/src/routes/status.js → GET /api/results/:jobId
+
+    utils:
+      objectStorageUrl.js:
+        purpose: >
+          Pure helper functions for parsing and inspecting OCI URLs.
+          No side-effects; easy to unit-test.
+        functions:
+          parseObjectKeyFromUrl:
+            does: >
+              Strips the endpoint and bucket prefix from a path-style OCI URL
+              to extract the bare objectKey (e.g. "uploads/1234-scan.jpg").
+            receives: urlString (string), bucket (string)
+            returns: objectKey string | null
+            called_by: [ api_gateway/src/services/presignResult.js → presignJobResult ]
+
+          isAlreadyPresigned:
+            does: >
+              Returns true when the URL already contains SigV4 query params
+              (X-Amz-Algorithm or X-Amz-Signature) so presignJobResult does not
+              double-sign a URL that was already signed.
+            receives: urlString (string)
+            returns: boolean
+            called_by: [ api_gateway/src/services/presignResult.js → presignJobResult ]
+
+    routes:
+      upload.js:
+        purpose: >
+          Single POST handler. Orchestrates the full upload pipeline:
+          validate → store in OCI → create job record → fire Kafka event → respond.
+        functions:
+          uploadRoutes (Fastify plugin):
+            does: Registers POST /api/upload on the Fastify instance.
+            route: POST /api/upload
+            steps:
+              1: Parse multipart body; reject if missing.
+              2: Validate size (≤ 50 MB) and MIME type.
+              3: uploadToOCI → get objectKey.
+              4: createJob → get jobId.
+              5: publishEvent(KAFKA_TOPIC_IMAGE_UPLOADS, payload).
+              6: Respond 202 { jobId, status:"queued" }.
+            called_by: [ api_gateway/src/index.js → app.register ]
+
+      status.js:
+        purpose: >
+          Two GET handlers for polling. Both call getJob then presign URLs
+          before responding; the /results variant additionally checks
+          completion and returns 202 if still processing.
+        functions:
+          statusRoutes (Fastify plugin):
+            does: Registers GET /api/status/:jobId and GET /api/results/:jobId.
+            routes:
+              GET /api/status/:jobId:
+                does: Returns full job record including partial state.
+              GET /api/results/:jobId:
+                does: >
+                  Returns 202 until status=completed, then returns the
+                  presigned result object (prediction + imageUrls).
+            called_by: [ api_gateway/src/index.js → app.register ]
+
+    index.js:
+      purpose: >
+        Bootstrap module. Wires Fastify plugins, calls every infra init function
+        in order (Redis → Postgres → Kafka producer), then starts listening.
+        Registers SIGINT/SIGTERM handlers for graceful shutdown.
+      startup_order: [ initRedis, initializeDatabase, connectProducer, app.listen ]
+      shutdown_order: [ disconnectProducer, redis.quit, db.end, app.close ]
+
+  # ──────────────────────────────────────────────────────────
+  # 2. IMAGE PROCESSOR  (Python / confluent-kafka / OpenCV)
+  # Consumes image_uploads events, applies 7 OpenCV filters,
+  # uploads each variant to OCI in parallel, publishes done event.
+  # ──────────────────────────────────────────────────────────
+  image_processor:
+
+    config:
+      settings.py:
+        purpose: Pydantic BaseSettings; reads env-vars; exposes typed settings object.
+        exports: [ settings ]
+
+    infra:
+      kafka_consumer.py:
+        functions:
+          _create_consumer (private):
+            does: Builds a confluent-kafka Consumer subscribed to image_uploads topic.
+            called_by: [ consume_forever ]
+
+          consume_forever:
+            does: >
+              Blocking loop (poll every 1 s). For each message, JSON-decodes
+              the payload and calls the injected async message_handler via
+              asyncio.run(). Closes consumer on exit.
+            receives: message_handler (async callable)
+            called_by: [ image_processor/main.py → main() ]
+
+      kafka_producer.py:
+        functions:
+          publish_event:
+            does: >
+              Serialises payload to JSON, produce()s to the given topic,
+              polls the delivery queue (non-blocking), then flush()es with a
+              5 s timeout to confirm delivery before returning.
+            receives: topic (string), payload (dict)
+            called_by: [ image_processor/services/image_handler.py → handle_image_uploaded ]
+
+      oci_client.py:
+        functions:
+          download_image:
+            does: GETs the original uploaded image bytes from OCI by objectKey.
+            receives: object_key (string)
+            returns: bytes
+            called_by: [ image_processor/services/image_handler.py → handle_image_uploaded ]
+
+          upload_variant:
+            does: >
+              PUTs one processed-variant JPEG to processed/{job_id}/{variant}-{filename}.
+              Returns a plain URL string (will be presigned by the gateway at read time).
+            receives: job_id, variant_name, image_bytes, filename
+            returns: url string
+            called_by: [ image_processor/services/parallel_upload.py → upload_variants_in_parallel ]
+
+    services:
+      monolithic_variants.py:
+        purpose: >
+          Ported from the legacy monolith. Implements 7 OpenCV image transforms;
+          each function accepts raw bytes → returns JPEG bytes.
+        functions:
+          _load_normalized (private):
+            does: PIL decode → float32 ndarray / 255.
+          _rgb_u8_to_jpeg (private):
+            does: RGB ndarray → JPEG bytes via OpenCV imencode.
+          get_heatmap_image:
+            does: Returns (original_rgb, grayscale, heatmap_rgb) from a normalised array.
+          get_canny_edges:
+            does: Canny edge detector (threshold 100/200) → edges_rgb.
+          get_clahe_enhanced:
+            does: CLAHE histogram equalisation on grayscale → enhanced_rgb.
+          get_morphological_result:
+            does: Binary threshold + ellipse kernel morphology (open/close/dilate/erode).
+          get_contours:
+            does: Binary threshold → contour detection; draws green contours on copy.
+          variant_original:     { produces: original RGB JPEG }
+          variant_grayscale:    { produces: grayscale JPEG }
+          variant_heatmap:      { produces: JET colormap heatmap JPEG }
+          variant_canny_edges:  { produces: Canny edges JPEG }
+          variant_clahe_enhanced:     { produces: CLAHE equalised JPEG }
+          variant_morphological_dilate: { produces: morphological dilation JPEG }
+          variant_contours_detected:  { produces: contour overlay JPEG }
+        exports:
+          VARIANTS: dict mapping variant_name → transform(bytes)→bytes
+          called_by: [ image_processor/services/processor.py (re-export) ]
+
+      processor.py:
+        purpose: Re-exports VARIANTS from monolithic_variants; decoupling layer.
+        exports: [ VARIANTS ]
+        called_by: [ image_processor/services/image_handler.py ]
+
+      image_handler.py:
+        functions:
+          handle_image_uploaded:
+            does: >
+              Main event handler. Downloads original image → runs all VARIANTS
+              dict transforms in a dict comprehension → uploads all variants
+              in parallel → publishes image_processing_done event with image_urls.
+            receives: event { job_id, object_key, filename }
+            steps:
+              1: download_image(object_key) → raw bytes.
+              2: Apply every VARIANTS transform → { name: jpeg_bytes }.
+              3: upload_variants_in_parallel() → list of URL strings.
+              4: publish_event(KAFKA_TOPIC_IMAGE_DONE, { job_id, image_urls }).
+            called_by: [ image_processor/main.py via consume_forever ]
+
+      parallel_upload.py:
+        functions:
+          upload_variants_in_parallel:
+            does: >
+              Uses ThreadPoolExecutor (max 4 workers, capped to variant count)
+              to call upload_variant concurrently for each variant. Collects
+              returned URLs via as_completed and returns them as a list.
+            receives: job_id, filename, variant_images dict, max_workers=4
+            returns: list[url strings]
+            called_by: [ image_processor/services/image_handler.py → handle_image_uploaded ]
+
+    main.py:
+      purpose: Entry-point. Sets up logging, then calls consume_forever(handle_image_uploaded).
+
+  # ──────────────────────────────────────────────────────────
+  # 3. ML SERVICE  (Python / TensorFlow / Keras)
+  # Same Kafka topic as image_processor but independent consumer
+  # group. Downloads image, runs brain-tumor classifier, publishes
+  # ml_result_ready with prediction + confidence.
+  # ──────────────────────────────────────────────────────────
+  ml_service:
+
+    config:
+      settings.py:
+        purpose: Pydantic BaseSettings; provides MODEL_PATH and Kafka/OCI vars.
+        exports: [ settings ]
+
+    infra:
+      kafka_consumer.py:
+        functions:
+          _create_consumer (private):
+            does: >
+              Confluent-kafka Consumer subscribed to image_uploads, using
+              KAFKA_GROUP_ML (different group from image_processor so both
+              services receive every event independently).
+            called_by: [ consume_forever ]
+
+          consume_forever:
+            does: Same blocking poll loop as image_processor version.
+            called_by: [ ml_service/main.py → main() ]
+
+      kafka_producer.py:
+        functions:
+          publish_event:
+            does: Identical to image_processor version; client.id="ml-service".
+            called_by: [ ml_service/services/ml_handler.py → handle_image_uploaded ]
+
+      oci_client.py:
+        functions:
+          download_image:
+            does: Same as image_processor version (read-only; no upload needed here).
+            called_by: [ ml_service/services/ml_handler.py → handle_image_uploaded ]
+
+    services:
+      brain_tumor_ml.py:
+        purpose: >
+          Encapsulates all ML logic. Model is loaded once at module import
+          time (module-level call in ml_handler.py) so every subsequent
+          event reuses the in-memory model without re-loading from disk.
+        functions:
+          try_load_model:
+            does: >
+              Loads the Keras .keras file using tf.keras.models.load_model
+              (compile=False, safe_mode=False). Sets global model=None if
+              the file is missing or fails; service keeps running and returns
+              "model_not_loaded" results instead of crashing.
+            receives: model_path (string from settings.MODEL_PATH)
+            called_by: [ ml_service/services/ml_handler.py → module-level on import ]
+
+          preprocess_image:
+            does: >
+              PIL decode → RGB → resize to 128×128 → float32/255 → add batch
+              dimension [1,128,128,3]. Matches the training preprocessing pipeline
+              from the original monolith.
+            receives: image_data (bytes)
+            returns: np.ndarray shape [1,128,128,3]
+            called_by: [ ml_service/services/ml_handler.py → handle_image_uploaded ]
+
+          run_inference:
+            does: >
+              Runs model.predict(); reads sigmoid output float.
+              confidence > 0.5 → class 1 "Tumor Present", else class 0 "No Tumor".
+              Returns (label, confidence_float).
+            receives: preprocessed_batch (np.ndarray)
+            returns: tuple(label: string, confidence: float)
+            called_by: [ ml_service/services/ml_handler.py → handle_image_uploaded ]
+
+      ml_handler.py:
+        functions:
+          handle_image_uploaded:
+            does: >
+              Orchestrates: download → preprocess → inference → publish.
+              try_load_model() is called at module import (top of file),
+              so by the time the first Kafka message arrives the model is
+              already in RAM.
+            receives: event { job_id, object_key }
+            steps:
+              1: download_image(object_key) → bytes.
+              2: preprocess_image(bytes) → batch ndarray.
+              3: run_inference(batch) → (prediction, confidence).
+              4: publish_event(KAFKA_TOPIC_ML_RESULT, { job_id, prediction, confidence }).
+            called_by: [ ml_service/main.py via consume_forever ]
+
+    main.py:
+      purpose: Entry-point. Configures logging, calls consume_forever(handle_image_uploaded).
+
+  # ──────────────────────────────────────────────────────────
+  # 4. RESULT AGGREGATOR  (Node.js / kafkajs)
+  # Listens for BOTH ml_result_ready and image_processing_done.
+  # Uses Redis WATCH/MULTI (optimistic locking) to merge the two
+  # partial results into one completed job record atomically.
+  # Persists the finished record to Postgres once.
+  # ──────────────────────────────────────────────────────────
+  result_aggregator:
+
+    config:
+      env.js:
+        purpose: Same requireEnv/parseNumber pattern as api_gateway. Frozen env object.
+        exports: [ env ]
+
+    infra:
+      kafka.js:
+        purpose: >
+          Single KafkaJS consumer subscribed to TWO topics simultaneously
+          (ml_result_ready + image_processing_done). Routes each message to
+          the correct handler based on topic name.
+        functions:
+          runConsumers:
+            does: >
+              Connects the consumer, subscribes to both topics, starts the
+              KafkaJS eachMessage loop. Dispatches to handlers.onMLResult or
+              handlers.onImageDone depending on topic.
+            receives: handlers { onMLResult, onImageDone }
+            called_by: [ result_aggregator/src/index.js → start() ]
+
+          disconnectConsumer:
+            does: Closes the KafkaJS consumer gracefully on SIGINT/SIGTERM.
+            called_by: [ result_aggregator/src/index.js → shutdown() ]
+
+      redis.js:
+        purpose: ioredis singleton. Same REDIS_URL as api_gateway so both services
+          share the same Redis instance and same key namespace (job:{id}).
+        exports: [ redis ]
+
+      db.js:
+        purpose: >
+          pg.Pool for the aggregator. Independent connection pool from the
+          api_gateway's postgres.js — same physical Postgres, different
+          in-process pool. This service writes only to job_results (via
+          persist.js); it never writes to jobs/predictions/results tables.
+        exports: [ pool ]
+
+    services:
+      aggregator.js:
+        purpose: >
+          Core merge logic. Both ML and image pipeline finish at different
+          times; this module handles whichever arrives first and marks the
+          job complete only when BOTH flags (mlDone + imageDone) are set.
+          Redis WATCH/MULTI prevents a race condition if both results arrive
+          within the same millisecond.
+        functions:
+          mergeJob (private):
+            does: >
+              Reads the job key with WATCH (optimistic lock). Applies the
+              caller's updater function to the parsed object. If both mlDone
+              and imageDone are now true, sets status=completed and assembles
+              job.result { prediction, confidence, imageUrls }. Writes back
+              atomically via MULTI/EXEC. Retries up to 30 times if another
+              writer invalidated the WATCH. Calls persistResult fire-and-forget
+              after the job is finalized.
+            receives: jobId (string), updater (function mutating job in-place)
+            called_by: [ handleMLResult, handleImageDone ]
+
+          handleMLResult:
+            does: Sets job.prediction, job.confidence, job.mlDone=true via mergeJob.
+            receives: event { job_id, prediction, confidence }
+            called_by: [ result_aggregator/src/infra/kafka.js → runConsumers eachMessage ]
+
+          handleImageDone:
+            does: Sets job.imageUrls, job.imageDone=true via mergeJob.
+            receives: event { job_id, image_urls[] }
+            called_by: [ result_aggregator/src/infra/kafka.js → runConsumers eachMessage ]
+
+      persist.js:
+        functions:
+          persistResult:
+            does: >
+              Inserts one row into job_results (INSERT ... ON CONFLICT DO NOTHING
+              so a retry never creates a duplicate). Called exactly once per job,
+              fire-and-forget from mergeJob, after status is set to completed.
+            receives: job_id (string), job (object with prediction/confidence/imageUrls)
+            called_by: [ result_aggregator/src/services/aggregator.js → mergeJob ]
+
+    index.js:
+      purpose: >
+        Bootstrap: verifies Postgres is reachable (SELECT 1), starts Kafka
+        consumers. Registers SIGINT/SIGTERM for graceful shutdown.
+
+  # ──────────────────────────────────────────────────────────
+  # 5. FRONTEND  (React 18 / TypeScript / Vite → served by nginx)
+  # Single-page app. No direct database access. All data comes
+  # from the API gateway via /api/... (nginx proxies the path).
+  # ──────────────────────────────────────────────────────────
+  frontend:
+
+    src:
+      App.tsx:
+        purpose: >
+          Root component. Manages the full upload → poll → display lifecycle
+          in a single file for simplicity.
+        functions:
+          variantLabel:
+            does: >
+              Derives a human-readable caption from an image URL's filename
+              segment (e.g. "canny_edges-scan.jpg" → "Canny Edges").
+            called_by: [ GalleryFigure component ]
+
+          formatConfidence:
+            does: Formats a 0–1 or 0–100 float as "XX.X%".
+            called_by: [ outcome confidence display in JSX ]
+
+          GalleryFigure:
+            does: >
+              Renders one image tile: square frame with object-fit:contain,
+              lazy-loaded <img>, fallback placeholder on load error, figcaption
+              with variant label and "Open full size" link.
+            receives: url (presigned OCI URL string)
+            called_by: [ App JSX → gallery section ]
+
+          App (default export):
+            state:
+              - file: selected File or null
+              - busy: upload in progress
+              - err: error string
+              - jobId: UUID after successful upload
+              - status: workflow status string
+              - result: { prediction, confidence, imageUrls[] }
+            hooks:
+              useEffect (polling):
+                does: >
+                  Polls GET /api/results/:jobId every 2 s until status=completed
+                  or an error is received. Clears the interval and stores the
+                  result when done.
+            handlers:
+              submit: POST /api/upload (multipart), stores jobId, triggers polling.
+              reset: Clears all state and file input.
+
+    nginx.conf:
+      purpose: >
+        nginx server block (port 80 inside container).
+        Serves dist/ as static files.
+        Proxies /api/ and /health to http://api_gateway:3000 so the browser
+        uses one origin and never needs to know the gateway port.
+      routes:
+        /api/:    { proxy_pass: "http://api_gateway:3000" }
+        /health:  { proxy_pass: "http://api_gateway:3000/health" }
+        /:        { try_files: "$uri $uri/ /index.html" }   # SPA fallback

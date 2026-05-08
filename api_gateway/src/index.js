@@ -21,29 +21,29 @@ app.get('/health', async () => ({
 
 async function start() {
   try {
-    console.log('🚀 [STARTUP] Initializing API Gateway...')
+    console.log('[STARTUP] Initializing API Gateway...')
     await initRedis()
     await initializeDatabase()
     await connectProducer()
     await app.listen({ host: '0.0.0.0', port: env.PORT })
-    console.log(`✅ [STARTUP] API Gateway running on port ${env.PORT}`)
+    console.log(`[STARTUP] API Gateway running on port ${env.PORT}`)
   } catch (err) {
-    console.error('❌ [STARTUP] Failed:', err.message)
+    console.error('[STARTUP] Failed:', err.message)
     process.exit(1)
   }
 }
 
 async function shutdown() {
-  console.log('🛑 [SHUTDOWN] Gracefully shutting down...')
+  console.log('[SHUTDOWN] Gracefully shutting down...')
   try {
     await disconnectProducer()
     await redis.quit()
     if (db) await db.end()
     await app.close()
-    console.log('✅ [SHUTDOWN] Complete')
+    console.log('[SHUTDOWN] Complete')
     process.exit(0)
   } catch (err) {
-    console.error('❌ [SHUTDOWN] Error:', err.message)
+    console.error('[SHUTDOWN] Error:', err.message)
     process.exit(1)
   }
 }

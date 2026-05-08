@@ -1,11 +1,10 @@
-import { pool } from './infra/db.js'
+import { pool, initializeDatabase } from './infra/db.js'
 import { runConsumers, disconnectConsumer } from './infra/kafka.js'
 import { redis } from './infra/redis.js'
 import { handleMLResult, handleImageDone } from './services/aggregator.js'
 
 async function start() {
-  await pool.query('SELECT 1')
-
+  await initializeDatabase()
   await runConsumers({
     onMLResult: handleMLResult,
     onImageDone: handleImageDone,

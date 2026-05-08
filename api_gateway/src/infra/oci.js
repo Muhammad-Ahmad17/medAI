@@ -25,10 +25,10 @@ export async function uploadToOCI(buffer, filename, mimetype) {
     })
 
     await s3.send(command)
-    console.log(`✅ [OCI] Uploaded to ${objectKey}`)
+    console.log(`[OCI] Uploaded to ${objectKey}`)
     return objectKey
   } catch (err) {
-    console.error('❌ [OCI] Upload failed:', err.message)
+    console.error('[OCI] Upload failed:', err.message)
     throw err
   }
 }
@@ -44,7 +44,7 @@ export async function downloadFromOCI(objectKey) {
     const buffer = await response.Body.transformToByteArray()
     return Buffer.from(buffer)
   } catch (err) {
-    console.error('❌ [OCI] Download failed:', err.message)
+    console.error('[OCI] Download failed:', err.message)
     throw err
   }
 }

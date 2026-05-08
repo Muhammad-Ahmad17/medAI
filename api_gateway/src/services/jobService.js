@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import { redis } from '../infra/redis.js'
 import { db } from '../infra/postgres.js'
 
-const JOB_TTL = 86400 * 7 // 7 days
+const JOB_TTL = 86400 * 7 // time-to-live 7 days
 
 export async function createJob(jobData) {
   const jobId = randomUUID()
@@ -17,7 +17,7 @@ export async function createJob(jobData) {
   }
 
   // Store in Redis for fast access
-  await redis.setex(
+  await redis.setex(  // SET with EXpiration
     `job:${jobId}`,
     JOB_TTL,
     JSON.stringify(jobRecord)
@@ -31,10 +31,10 @@ export async function createJob(jobData) {
       [jobId, jobData.filename, jobData.filesize, jobData.objectKey, jobData.mimetype, 'received', now, now]
     )
   } catch (err) {
-    console.error('❌ [DB] Failed to store job:', err.message)
+    console.error('[DB] Failed to store job:', err.message)
   }
 
-  console.log(`✅ [JOB] Created ${jobId}`)
+  console.log(`[JOB] Created ${jobId}`)
   return jobId
 }
 
@@ -66,7 +66,7 @@ export async function getJob(jobId) {
       updatedAt: row.updated_at
     }
   } catch (err) {
-    console.error('❌ [DB] Failed to fetch job:', err.message)
+    console.error(' [DB] Failed to fetch job:', err.message)
     return null
   }
 }
@@ -97,7 +97,7 @@ export async function updateJobStatus(jobId, status, updates = {}) {
       [status, resultJson, now, jobId]
     )
   } catch (err) {
-    console.error('❌ [DB] Failed to update job:', err.message)
+    console.error('[DB] Failed to update job:', err.message)
   }
 
   return updated

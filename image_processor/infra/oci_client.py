@@ -33,5 +33,5 @@ def upload_variant(job_id: str, variant_name: str, image_bytes: bytes, filename:
         ContentType="image/jpeg",
     )
 
-    endpoint = settings.OCI_ENDPOINT.rstrip("/")
+    endpoint = settings.OCI_ENDPOINT.rstrip("/") # remove slash from the end 
     return f"{endpoint}/{settings.OCI_BUCKET}/{object_key}"

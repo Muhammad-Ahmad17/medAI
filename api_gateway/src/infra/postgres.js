@@ -15,12 +15,12 @@ export async function initializeDatabase() {
 
     const conn = await db.connect()
     conn.release()
-    console.log('✅ [DB] Connected to PostgreSQL')
+    console.log('[DB] Connected to PostgreSQL')
 
     // Create tables if they don't exist
     await createTables()
   } catch (err) {
-    console.error('❌ [DB] Connection failed:', err.message)
+    console.error('[DB] Connection failed:', err.message)
     throw err
   }
 }
@@ -70,12 +70,12 @@ async function createTables() {
       await db.query(query)
     } catch (err) {
       if (!err.message.includes('already exists')) {
-        console.error('❌ [DB] Schema creation failed:', err.message)
+        console.error('[DB] Schema creation failed:', err.message)
       }
     }
   }
 
-  console.log('✅ [DB] Tables initialized')
+  console.log('[DB] Tables initialized')
 }
 
 export { db }

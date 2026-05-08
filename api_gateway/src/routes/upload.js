@@ -14,7 +14,7 @@ export async function uploadRoutes(fastify) {
         return reply.status(400).send({ error: 'No file provided' })
       }
 
-      const { filename, mimetype, encoding } = data
+      const { filename, mimetype, encoding } = data // mimetype=imagestype
       const buffer = await data.toBuffer()
 
       // Validate file
@@ -30,11 +30,11 @@ export async function uploadRoutes(fastify) {
         })
       }
 
-      console.log(`📤 [UPLOAD] ${filename} (${buffer.length} bytes)`)
+      console.log(`[UPLOAD] ${filename} (${buffer.length} bytes)`)
 
       // Upload to OCI
       const objectKey = await uploadToOCI(buffer, filename, mimetype)
-      console.log(`💾 [OCI] Stored at ${objectKey}`)
+      console.log(`[OCI] Stored at ${objectKey}`)
 
       // Create job
       const jobId = await createJob({
@@ -44,18 +44,21 @@ export async function uploadRoutes(fastify) {
         mimetype,
         status: 'received'
       })
-      console.log(`📋 [JOB] Created ${jobId}`)
+      console.log(`[JOB] Created ${jobId}`)
 
       // Publish event
-      await publishEvent(env.KAFKA_TOPIC_IMAGE_UPLOADS, {
-        job_id: jobId,
-        object_key: objectKey,
-        filename,
-        filesize: buffer.length,
-        mimetype,
-        timestamp: new Date().toISOString(),
-      })
-      console.log(`📨 [KAFKA] Published upload event for ${jobId}`)
+      await publishEvent(
+        env.KAFKA_TOPIC_IMAGE_UPLOADS, 
+        {
+          job_id: jobId,
+          object_key: objectKey,
+          filename,
+          filesize: buffer.length,
+          mimetype,
+          timestamp: new Date().toISOString(),
+        }
+      )
+      console.log(`[KAFKA] Published upload event for ${jobId}`)
 
       return reply.status(202).send({
         jobId,
@@ -63,7 +66,7 @@ export async function uploadRoutes(fastify) {
         message: 'Image received and queued for processing'
       })
     } catch (err) {
-      console.error('❌ [UPLOAD] Error:', err.message)
+      console.error('[UPLOAD] Error:', err.message)
       return reply.status(500).send({ error: err.message })
     }
   })

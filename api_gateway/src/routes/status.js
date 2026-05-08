@@ -2,6 +2,7 @@ import { getJob } from '../services/jobService.js'
 import { presignJobResult } from '../services/presignResult.js'
 
 export async function statusRoutes(fastify) {
+
   fastify.get('/api/status/:jobId', async (req, reply) => {
     try {
       const { jobId } = req.params
@@ -14,7 +15,7 @@ export async function statusRoutes(fastify) {
         })
       }
 
-      console.log(`📊 [STATUS] Job ${jobId}: ${job.status}`)
+      console.log(`[STATUS] Job ${jobId}: ${job.status}`)
 
       const result =
         job.result != null ? await presignJobResult(job.result) : null
@@ -29,7 +30,7 @@ export async function statusRoutes(fastify) {
         updatedAt: job.updatedAt
       })
     } catch (err) {
-      console.error('❌ [STATUS] Error:', err.message)
+      console.error('[STATUS] Error:', err.message)
       return reply.status(500).send({ error: err.message })
     }
   })
@@ -57,7 +58,7 @@ export async function statusRoutes(fastify) {
       const signed = await presignJobResult(job.result)
       return reply.send(signed)
     } catch (err) {
-      console.error('❌ [RESULTS] Error:', err.message)
+      console.error('[RESULTS] Error:', err.message)
       return reply.status(500).send({ error: err.message })
     }
   })
