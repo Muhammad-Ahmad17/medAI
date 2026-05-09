@@ -1,0 +1,16 @@
+{
+  "name": "auth-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test src/routes/auth.test.js"
+  },
+  "dependencies": {
+    "@fastify/jwt": "^8.0.1",
+    "bcrypt": "^5.1.1",
+    "fastify": "^4.28.1",
+    "pg": "^8.13.3"
+  }
+}

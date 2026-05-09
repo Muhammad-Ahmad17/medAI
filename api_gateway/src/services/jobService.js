@@ -16,19 +16,14 @@ export async function createJob(jobData) {
     updatedAt: now
   }
 
-  // Store in Redis for fast access
-  await redis.setex(  // SET with EXpiration
-    `job:${jobId}`,
-    JOB_TTL,
-    JSON.stringify(jobRecord)
-  )
+  await redis.setex(`job:${jobId}`, JOB_TTL, JSON.stringify(jobRecord))
 
-  // Store in PostgreSQL for persistence
   try {
     await db.query(
-      `INSERT INTO jobs (job_id, filename, filesize, object_key, mimetype, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [jobId, jobData.filename, jobData.filesize, jobData.objectKey, jobData.mimetype, 'received', now, now]
+      `INSERT INTO jobs (job_id, filename, filesize, object_key, mimetype, status, user_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [jobId, jobData.filename, jobData.filesize, jobData.objectKey, jobData.mimetype,
+       'received', jobData.userId ?? null, now, now]
     )
   } catch (err) {
     console.error('[DB] Failed to store job:', err.message)
@@ -36,6 +31,31 @@ export async function createJob(jobData) {
 
   console.log(`[JOB] Created ${jobId}`)
   return jobId
+}
+
+export async function listJobsByUser(userId, limit = 50) {
+  try {
+    const result = await db.query(
+      `SELECT job_id, filename, filesize, status, result, created_at, updated_at
+       FROM jobs
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [userId, limit]
+    )
+    return result.rows.map((row) => ({
+      jobId: row.job_id,
+      filename: row.filename,
+      filesize: row.filesize,
+      status: row.status,
+      result: row.result ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }))
+  } catch (err) {
+    console.error('[DB] Failed to list jobs:', err.message)
+    return []
+  }
 }
 
 export async function getJob(jobId) {

@@ -40,6 +40,10 @@ async function createTables() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )`,
 
+    // Add user_id to jobs if the table already existed without it
+    `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_id UUID`,
+    `CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs(user_id)`,
+
     // Predictions table
     `CREATE TABLE IF NOT EXISTS predictions (
       id UUID PRIMARY KEY,

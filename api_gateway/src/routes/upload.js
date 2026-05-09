@@ -7,7 +7,7 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/tiff', 'application/octet-stream']
 
 export async function uploadRoutes(fastify) {
-  fastify.post('/api/upload', async (req, reply) => {
+  fastify.post('/api/upload', { onRequest: [fastify.authenticate] }, async (req, reply) => {
     try {
       const data = await req.file()
       if (!data) {
@@ -36,12 +36,13 @@ export async function uploadRoutes(fastify) {
       const objectKey = await uploadToOCI(buffer, filename, mimetype)
       console.log(`[OCI] Stored at ${objectKey}`)
 
-      // Create job
+      // Create job — attach the authenticated user so they can see it in My Reports
       const jobId = await createJob({
         filename,
         filesize: buffer.length,
         objectKey,
         mimetype,
+        userId: req.user?.userId ?? null,
         status: 'received'
       })
       console.log(`[JOB] Created ${jobId}`)

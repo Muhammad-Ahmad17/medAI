@@ -81,6 +81,22 @@ services:
     networks:
       - cancer_net
 
+  auth_service:
+    build:
+      context: ./auth_service
+    container_name: cancer-auth-service
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const http = require('http'); const req = http.get('http://localhost:4000/health', {timeout: 2000}, (res) => {process.exit(res.statusCode === 200 ? 0 : 1)}); req.on('error', () => process.exit(1));\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cancer_net
+
   api_gateway:
     build:
       context: ./api_gateway
@@ -94,6 +110,8 @@ services:
       redis:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      auth_service:
         condition: service_healthy
     # Bound to loopback only — public traffic uses frontend nginx → /api. Matches PORT inside the container.
     ports:
@@ -175,14 +193,27 @@ services:
     depends_on:
       api_gateway:
         condition: service_healthy
+      auth_service:
+        condition: service_healthy
     ports:
       - "${FRONTEND_PORT:-80}:80"
+    networks:
+      - cancer_net
+
+  ollama:
+    image: ollama/ollama
+    container_name: cancer-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    # After first `docker compose up`, pull a model:
+    #   docker exec cancer-ollama ollama pull llama3.2:3b
     networks:
       - cancer_net
 
 volumes:
   redis_data:
   postgres_data:
+  ollama_data:
 
 networks:
   cancer_net:

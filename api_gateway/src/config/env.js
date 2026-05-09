@@ -25,6 +25,7 @@ function parseBoundedInt(name, min, max, fallback) {
 
 export const env = Object.freeze({
   PORT: parsePort('PORT', 3000),
+  JWT_SECRET: requireEnv('JWT_SECRET'),
   KAFKA_BROKER: requireEnv('KAFKA_BROKER'),
   KAFKA_TOPIC_IMAGE_UPLOADS: requireEnv('KAFKA_TOPIC_IMAGE_UPLOADS'),
   REDIS_URL: requireEnv('REDIS_URL'),
@@ -38,6 +39,8 @@ export const env = Object.freeze({
   OCI_ACCESS_KEY: requireEnv('OCI_ACCESS_KEY'),
   OCI_SECRET_KEY: requireEnv('OCI_SECRET_KEY'),
   OCI_REGION: requireEnv('OCI_REGION'),
+  OLLAMA_URL: process.env.OLLAMA_URL ?? 'http://ollama:11434',
+  OLLAMA_MODEL: process.env.OLLAMA_MODEL ?? 'llama3.2:3b',
   /** Presigned GET TTL for result imageUrls (seconds). AWS SigV4 allows up to 7 days for IAM users. */
   OCI_PRESIGN_EXPIRES_SECONDS: parseBoundedInt(
     'OCI_PRESIGN_EXPIRES_SECONDS',

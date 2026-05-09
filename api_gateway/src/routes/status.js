@@ -1,7 +1,27 @@
-import { getJob } from '../services/jobService.js'
+import { getJob, listJobsByUser } from '../services/jobService.js'
 import { presignJobResult } from '../services/presignResult.js'
 
 export async function statusRoutes(fastify) {
+
+  // Returns all jobs for the authenticated user, with presigned imageUrls in completed results
+  fastify.get('/api/jobs', { onRequest: [fastify.authenticate] }, async (req, reply) => {
+    try {
+      const jobs = await listJobsByUser(req.user.userId)
+
+      const signed = await Promise.all(
+        jobs.map(async (job) => {
+          if (!job.result) return job
+          const result = await presignJobResult(job.result)
+          return { ...job, result }
+        }),
+      )
+
+      return reply.send({ jobs: signed })
+    } catch (err) {
+      console.error('[JOBS] Error:', err.message)
+      return reply.status(500).send({ error: err.message })
+    }
+  })
 
   fastify.get('/api/status/:jobId', async (req, reply) => {
     try {

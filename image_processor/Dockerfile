@@ -2,8 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 # no .pyc cache files
-ENV PYTHONUNBUFFERED=1 # log appear immediatley without buffer 
+ENV PYTHONDONTWRITEBYTECODE=1 
+# no .pyc cache files
+ENV PYTHONUNBUFFERED=1 
+# log appear immediatley without buffer 
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
