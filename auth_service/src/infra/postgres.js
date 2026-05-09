@@ -15,7 +15,7 @@ export const pool = new Pool({
 export async function initializeDatabase() {
   const conn = await pool.connect()
   conn.release()
-  console.log('✅ [DB] Connected to PostgreSQL')
+  console.log('[DB] Connected to PostgreSQL')
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -31,7 +31,7 @@ export async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)
   `)
 
-  console.log('✅ [DB] Tables initialized')
+  console.log('[DB] Tables initialized')
   await seedDemoUser()
 }
 
@@ -44,5 +44,5 @@ async function seedDemoUser() {
     `INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3)`,
     ['demo@example.com', hash, 'Demo User'],
   )
-  console.log('✅ [DB] Demo user seeded  →  demo@example.com / demo123')
+  console.log('[DB] Demo user seeded  →  demo@example.com / demo123')
 }

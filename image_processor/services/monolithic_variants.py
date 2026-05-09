@@ -1,9 +1,3 @@
-"""
-Image variants ported from monolithic/apis/fastapi_app.py (/process-images).
-
-Pipeline matches the monolith: PIL RGB -> float32 / 255, then OpenCV filters.
-"""
-
 from collections.abc import Callable
 from io import BytesIO
 

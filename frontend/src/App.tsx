@@ -208,19 +208,34 @@ function GalleryFigure({ url }: { url: string }) {
 
 // ─── Chat Panel ───────────────────────────────────────────────────────────────
 
-function ChatPanel({ scanContext, onClose }: { scanContext?: string; onClose: () => void }) {
+function ChatPanel({ scanContext, initialMessage, onClose }: {
+  scanContext?: string
+  initialMessage?: string
+  onClose: () => void
+}) {
   const [messages, setMessages] = useState<ChatMsg[]>([
     { role: 'assistant', content: 'Hello! I\'m medAI Assistant, specialized in brain tumor analysis. Ask me about your scan, MRI findings, or any brain tumor topics.' },
   ])
   const [input, setInput]   = useState('')
   const [busy, setBusy]     = useState(false)
+  const [elapsed, setElapsed] = useState(0)
   const [error, setError]   = useState<string | null>(null)
   const bottomRef           = useRef<HTMLDivElement>(null)
   const inputRef            = useRef<HTMLTextAreaElement>(null)
+  const didAutoSend         = useRef(false)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Auto-send initial message (e.g. from "Ask medAI about this scan" button)
+  useEffect(() => {
+    if (initialMessage && !didAutoSend.current) {
+      didAutoSend.current = true
+      void send(initialMessage)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const send = async (text: string) => {
     const msg = text.trim()
@@ -229,9 +244,13 @@ function ChatPanel({ scanContext, onClose }: { scanContext?: string; onClose: ()
     setError(null)
     setMessages(prev => [...prev, { role: 'user', content: msg }])
     setBusy(true)
+    setElapsed(0)
 
     // Add placeholder for assistant response
     setMessages(prev => [...prev, { role: 'assistant', content: '' }])
+
+    // Tick elapsed-seconds counter while waiting
+    const ticker = setInterval(() => setElapsed(s => s + 1), 1000)
 
     try {
       const res = await fetch('/api/chat', {
@@ -283,7 +302,9 @@ function ChatPanel({ scanContext, onClose }: { scanContext?: string; onClose: ()
         return copy
       })
     } finally {
+      clearInterval(ticker)
       setBusy(false)
+      setElapsed(0)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
   }
@@ -317,7 +338,10 @@ function ChatPanel({ scanContext, onClose }: { scanContext?: string; onClose: ()
           <div key={i} className={`chat-msg chat-msg--${m.role}`}>
             <div className="chat-msg__bubble">
               {m.content || (m.role === 'assistant' && busy && i === messages.length - 1
-                ? <span className="chat-typing"><span/><span/><span/></span>
+                ? <span className="chat-typing-wrap">
+                    <span className="chat-typing"><span/><span/><span/></span>
+                    <span className="chat-typing-elapsed">Generating{elapsed > 5 ? ` · ${elapsed}s (CPU inference)` : '…'}</span>
+                  </span>
                 : null)}
             </div>
           </div>
@@ -539,7 +563,8 @@ export default function App() {
   const [result, setResult] = useState<ResultsBody | null>(null)
 
   // Chat state
-  const [chatOpen, setChatOpen] = useState(false)
+  const [chatOpen, setChatOpen]           = useState(false)
+  const [chatInitialMsg, setChatInitialMsg] = useState<string | undefined>()
 
   const logout = () => {
     localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY)
@@ -738,7 +763,14 @@ export default function App() {
                     ⬇ Download PDF
                   </button>
                   <button className="btn btn--secondary btn--chat-prompt"
-                    onClick={() => setChatOpen(true)}>
+                    onClick={() => {
+                      setChatInitialMsg(
+                        result.prediction
+                          ? `My scan was classified as "${result.prediction}" with ${formatConfidence(result.confidence)} confidence. Can you explain what this means and what I should know?`
+                          : 'Can you explain the brain MRI image processing results shown here?'
+                      )
+                      setChatOpen(true)
+                    }}>
                     💬 Ask medAI about this scan
                   </button>
                 </div>
@@ -769,14 +801,20 @@ export default function App() {
 
       {/* ── Floating chat button ── */}
       {!chatOpen && (
-        <button className="chat-fab" onClick={() => setChatOpen(true)} aria-label="Open medAI Assistant">
+        <button className="chat-fab" onClick={() => { setChatInitialMsg(undefined); setChatOpen(true) }} aria-label="Open medAI Assistant">
           <span className="chat-fab__icon">💬</span>
           <span className="chat-fab__label"><span className="brand-med">med</span><span className="brand-ai">AI</span></span>
         </button>
       )}
 
       {/* ── Chat panel ── */}
-      {chatOpen && <ChatPanel scanContext={chatContext} onClose={() => setChatOpen(false)} />}
+      {chatOpen && (
+        <ChatPanel
+          scanContext={chatContext}
+          initialMessage={chatInitialMsg}
+          onClose={() => { setChatOpen(false); setChatInitialMsg(undefined) }}
+        />
+      )}
     </div>
   )
 }
